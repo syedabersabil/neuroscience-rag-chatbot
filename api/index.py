@@ -1,5 +1,4 @@
 from flask import Flask, render_template_string, request, jsonify, Response
-from groq import Groq
 import os
 import re
 from collections import Counter
@@ -7,14 +6,20 @@ import math
 
 app = Flask(__name__)
 
-# API Key - IMPORTANT: Set as environment variable in Vercel!
-GROQ_API_KEY = os.getenv('GROQ_API_KEY')
+# API Key - with fallback for testing
+GROQ_API_KEY = os.getenv('GROQ_API_KEY', '')
 
-if not GROQ_API_KEY:
-    raise ValueError("Please set GROQ_API_KEY environment variable")
-
-# Initialize Groq client
-client = Groq(api_key=GROQ_API_KEY)
+# Only import and initialize Groq if key is available
+if GROQ_API_KEY:
+    try:
+        from groq import Groq
+        client = Groq(api_key=GROQ_API_KEY)
+    except Exception as e:
+        print(f"Error initializing Groq: {e}")
+        client = None
+else:
+    client = None
+    print("Warning: GROQ_API_KEY not set")
 
 # Neuroscience knowledge base
 neuroscience_text = """Neuronal growth cones in the spinal cord of a chick embryo. These hand-like structures, on the tips of developing axons, carry out the most amazing feat of neural development: its wiring. Courtesy of the Cajal Institute, "Cajal Legacy," Spanish National Research Council (CSIC), Madrid, Spain.
@@ -63,6 +68,8 @@ def tokenize(text):
 # Build simple TF-IDF index
 def compute_tf(tokens):
     """Compute term frequency"""
+    if not tokens:
+        return {}
     counter = Counter(tokens)
     total = len(tokens)
     return {word: count / total for word, count in counter.items()}
@@ -80,56 +87,68 @@ def compute_idf(chunks):
     return {word: math.log(doc_count / count) for word, count in word_doc_count.items()}
 
 # Precompute TF-IDF for all chunks
-print("Building search index...")
-idf = compute_idf(chunks)
-chunk_vectors = []
-for chunk in chunks:
-    tokens = tokenize(chunk)
-    tf = compute_tf(tokens)
-    tfidf = {word: tf[word] * idf.get(word, 0) for word in tf}
-    chunk_vectors.append(tfidf)
-print(f"Indexed {len(chunks)} text chunks")
+try:
+    print("Building search index...")
+    idf = compute_idf(chunks)
+    chunk_vectors = []
+    for chunk in chunks:
+        tokens = tokenize(chunk)
+        tf = compute_tf(tokens)
+        tfidf = {word: tf[word] * idf.get(word, 0) for word in tf}
+        chunk_vectors.append(tfidf)
+    print(f"Indexed {len(chunks)} text chunks")
+except Exception as e:
+    print(f"Error building index: {e}")
+    chunk_vectors = []
 
 def cosine_similarity_tfidf(vec1, vec2):
     """Calculate cosine similarity between TF-IDF vectors"""
-    # Get common words
-    common = set(vec1.keys()) & set(vec2.keys())
-    
-    if not common:
+    try:
+        # Get common words
+        common = set(vec1.keys()) & set(vec2.keys())
+        
+        if not common:
+            return 0.0
+        
+        # Dot product
+        dot = sum(vec1[w] * vec2[w] for w in common)
+        
+        # Magnitudes
+        mag1 = math.sqrt(sum(v * v for v in vec1.values()))
+        mag2 = math.sqrt(sum(v * v for v in vec2.values()))
+        
+        if mag1 == 0 or mag2 == 0:
+            return 0.0
+        
+        return dot / (mag1 * mag2)
+    except Exception as e:
+        print(f"Error in similarity: {e}")
         return 0.0
-    
-    # Dot product
-    dot = sum(vec1[w] * vec2[w] for w in common)
-    
-    # Magnitudes
-    mag1 = math.sqrt(sum(v * v for v in vec1.values()))
-    mag2 = math.sqrt(sum(v * v for v in vec2.values()))
-    
-    if mag1 == 0 or mag2 == 0:
-        return 0.0
-    
-    return dot / (mag1 * mag2)
 
 def find_relevant_context(question, top_k=3):
     """Find most relevant text chunks for the question"""
-    # Compute TF-IDF for query
-    query_tokens = tokenize(question)
-    query_tf = compute_tf(query_tokens)
-    query_tfidf = {word: query_tf[word] * idf.get(word, 0) for word in query_tf}
-    
-    # Calculate similarities
-    similarities = []
-    for chunk_vec in chunk_vectors:
-        sim = cosine_similarity_tfidf(query_tfidf, chunk_vec)
-        similarities.append(sim)
-    
-    # Get top k indices
-    indexed_sims = list(enumerate(similarities))
-    indexed_sims.sort(key=lambda x: x[1], reverse=True)
-    top_indices = [idx for idx, _ in indexed_sims[:top_k]]
-    
-    relevant_chunks = [chunks[i] for i in top_indices]
-    return "\n\n".join(relevant_chunks)
+    try:
+        # Compute TF-IDF for query
+        query_tokens = tokenize(question)
+        query_tf = compute_tf(query_tokens)
+        query_tfidf = {word: query_tf[word] * idf.get(word, 0) for word in query_tf}
+        
+        # Calculate similarities
+        similarities = []
+        for chunk_vec in chunk_vectors:
+            sim = cosine_similarity_tfidf(query_tfidf, chunk_vec)
+            similarities.append(sim)
+        
+        # Get top k indices
+        indexed_sims = list(enumerate(similarities))
+        indexed_sims.sort(key=lambda x: x[1], reverse=True)
+        top_indices = [idx for idx, _ in indexed_sims[:top_k]]
+        
+        relevant_chunks = [chunks[i] for i in top_indices]
+        return "\n\n".join(relevant_chunks)
+    except Exception as e:
+        print(f"Error finding context: {e}")
+        return neuroscience_text[:1000]  # Fallback to first 1000 chars
 
 # HTML Template
 HTML_TEMPLATE = '''
@@ -274,6 +293,14 @@ HTML_TEMPLATE = '''
             color: #667eea;
             margin-bottom: 10px;
         }
+        .warning {
+            padding: 15px;
+            background: #fff3cd;
+            border-left: 4px solid #ffc107;
+            margin: 20px;
+            border-radius: 8px;
+            color: #856404;
+        }
     </style>
 </head>
 <body>
@@ -282,6 +309,12 @@ HTML_TEMPLATE = '''
             <h1>🧠 Neuroscience AI Chatbot</h1>
             <p>Ask questions about neural development and the nervous system</p>
         </div>
+        
+        {% if not api_key_set %}
+        <div class="warning">
+            <strong>⚠️ API Key Missing:</strong> The GROQ_API_KEY environment variable is not set. AI responses will not work until configured in Vercel settings.
+        </div>
+        {% endif %}
         
         <div class="info">
             <h3>💡 Try asking:</h3>
@@ -353,7 +386,7 @@ HTML_TEMPLATE = '''
                 }
             } catch (error) {
                 loadingDiv.remove();
-                addMessage('Sorry, there was an error processing your request.', 'ai');
+                addMessage('Sorry, there was an error: ' + error.message, 'ai');
             }
 
             sendBtn.disabled = false;
@@ -373,22 +406,27 @@ HTML_TEMPLATE = '''
 
 @app.route('/')
 def home():
-    return render_template_string(HTML_TEMPLATE)
+    return render_template_string(HTML_TEMPLATE, api_key_set=bool(GROQ_API_KEY))
 
 @app.route('/api/chat', methods=['POST'])
 def chat():
-    data = request.get_json()
-    question = data.get('question', '')
-    
-    if not question:
-        return jsonify({'error': 'No question provided'}), 400
-    
-    def generate():
-        # Get relevant context using TF-IDF
-        context = find_relevant_context(question)
+    try:
+        data = request.get_json()
+        question = data.get('question', '')
         
-        # Create prompt
-        prompt = f"""Based on the following neuroscience information, answer the question.
+        if not question:
+            return jsonify({'error': 'No question provided'}), 400
+        
+        if not client:
+            return Response("Error: GROQ_API_KEY environment variable not set. Please configure it in Vercel settings.", mimetype='text/plain')
+        
+        def generate():
+            try:
+                # Get relevant context using TF-IDF
+                context = find_relevant_context(question)
+                
+                # Create prompt
+                prompt = f"""Based on the following neuroscience information, answer the question.
 
 Context:
 {context}
@@ -396,23 +434,36 @@ Context:
 Question: {question}
 
 Answer:"""
+                
+                # Stream response from Groq
+                completion = client.chat.completions.create(
+                    model="llama-3.3-70b-versatile",
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.6,
+                    max_completion_tokens=2048,
+                    top_p=1,
+                    stream=True,
+                    stop=None
+                )
+                
+                for chunk in completion:
+                    if chunk.choices[0].delta.content:
+                        yield chunk.choices[0].delta.content
+            except Exception as e:
+                yield f"Error generating response: {str(e)}"
         
-        # Stream response from Groq
-        completion = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.6,
-            max_completion_tokens=2048,
-            top_p=1,
-            stream=True,
-            stop=None
-        )
-        
-        for chunk in completion:
-            if chunk.choices[0].delta.content:
-                yield chunk.choices[0].delta.content
-    
-    return Response(generate(), mimetype='text/plain')
+        return Response(generate(), mimetype='text/plain')
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/health')
+def health():
+    return jsonify({
+        'status': 'ok',
+        'api_key_set': bool(GROQ_API_KEY),
+        'chunks_indexed': len(chunks),
+        'vectors_built': len(chunk_vectors)
+    })
 
 @app.route('/api/info')
 def info():
@@ -421,7 +472,8 @@ def info():
         'retrieval': 'TF-IDF (keyword-based)',
         'llm': 'Groq (Llama 3.3 70B)',
         'chunks': len(chunks),
-        'framework': 'Flask + RAG (ultra-lightweight)'
+        'framework': 'Flask + RAG (ultra-lightweight)',
+        'api_configured': bool(GROQ_API_KEY)
     })
 
 if __name__ == '__main__':

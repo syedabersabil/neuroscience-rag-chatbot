@@ -1,42 +1,20 @@
 from flask import Flask, render_template_string, request, jsonify, Response
-import nomic
-from nomic import embed
 from groq import Groq
 import os
+import re
+from collections import Counter
 import math
 
 app = Flask(__name__)
 
-# API Keys - IMPORTANT: Set these as environment variables in Vercel!
-NOMIC_API_KEY = os.getenv('NOMIC_API_KEY')
+# API Key - IMPORTANT: Set as environment variable in Vercel!
 GROQ_API_KEY = os.getenv('GROQ_API_KEY')
 
-if not NOMIC_API_KEY or not GROQ_API_KEY:
-    raise ValueError("Please set NOMIC_API_KEY and GROQ_API_KEY environment variables")
-
-# Login to Nomic
-nomic.cli.login(NOMIC_API_KEY)
+if not GROQ_API_KEY:
+    raise ValueError("Please set GROQ_API_KEY environment variable")
 
 # Initialize Groq client
 client = Groq(api_key=GROQ_API_KEY)
-
-# Pure Python cosine similarity (no numpy!)
-def dot_product(v1, v2):
-    """Calculate dot product of two vectors"""
-    return sum(a * b for a, b in zip(v1, v2))
-
-def magnitude(v):
-    """Calculate magnitude of a vector"""
-    return math.sqrt(sum(x * x for x in v))
-
-def cosine_similarity(v1, v2):
-    """Calculate cosine similarity between two vectors"""
-    dot = dot_product(v1, v2)
-    mag1 = magnitude(v1)
-    mag2 = magnitude(v2)
-    if mag1 == 0 or mag2 == 0:
-        return 0.0
-    return dot / (mag1 * mag2)
 
 # Neuroscience knowledge base
 neuroscience_text = """Neuronal growth cones in the spinal cord of a chick embryo. These hand-like structures, on the tips of developing axons, carry out the most amazing feat of neural development: its wiring. Courtesy of the Cajal Institute, "Cajal Legacy," Spanish National Research Council (CSIC), Madrid, Spain.
@@ -77,30 +55,72 @@ Activity-dependent refinement happens at particular times during development. To
 # Split text into chunks
 chunks = [chunk.strip() for chunk in neuroscience_text.split('\n\n') if chunk.strip()]
 
-# Generate embeddings (initialize once when app starts)
-print("Initializing embeddings...")
-output = embed.text(
-    texts=chunks,
-    model='nomic-embed-text-v1.5',
-    task_type='search_document',
-)
-# Store as Python lists instead of numpy arrays
-doc_embeddings = output['embeddings']
-print(f"Embedded {len(chunks)} text chunks")
+# Simple tokenizer
+def tokenize(text):
+    """Convert text to lowercase tokens"""
+    return re.findall(r'\w+', text.lower())
+
+# Build simple TF-IDF index
+def compute_tf(tokens):
+    """Compute term frequency"""
+    counter = Counter(tokens)
+    total = len(tokens)
+    return {word: count / total for word, count in counter.items()}
+
+def compute_idf(chunks):
+    """Compute inverse document frequency"""
+    doc_count = len(chunks)
+    word_doc_count = {}
+    
+    for chunk in chunks:
+        words = set(tokenize(chunk))
+        for word in words:
+            word_doc_count[word] = word_doc_count.get(word, 0) + 1
+    
+    return {word: math.log(doc_count / count) for word, count in word_doc_count.items()}
+
+# Precompute TF-IDF for all chunks
+print("Building search index...")
+idf = compute_idf(chunks)
+chunk_vectors = []
+for chunk in chunks:
+    tokens = tokenize(chunk)
+    tf = compute_tf(tokens)
+    tfidf = {word: tf[word] * idf.get(word, 0) for word in tf}
+    chunk_vectors.append(tfidf)
+print(f"Indexed {len(chunks)} text chunks")
+
+def cosine_similarity_tfidf(vec1, vec2):
+    """Calculate cosine similarity between TF-IDF vectors"""
+    # Get common words
+    common = set(vec1.keys()) & set(vec2.keys())
+    
+    if not common:
+        return 0.0
+    
+    # Dot product
+    dot = sum(vec1[w] * vec2[w] for w in common)
+    
+    # Magnitudes
+    mag1 = math.sqrt(sum(v * v for v in vec1.values()))
+    mag2 = math.sqrt(sum(v * v for v in vec2.values()))
+    
+    if mag1 == 0 or mag2 == 0:
+        return 0.0
+    
+    return dot / (mag1 * mag2)
 
 def find_relevant_context(question, top_k=3):
     """Find most relevant text chunks for the question"""
-    query_output = embed.text(
-        texts=[question],
-        model='nomic-embed-text-v1.5',
-        task_type='search_query',
-    )
-    query_embedding = query_output['embeddings'][0]
+    # Compute TF-IDF for query
+    query_tokens = tokenize(question)
+    query_tf = compute_tf(query_tokens)
+    query_tfidf = {word: query_tf[word] * idf.get(word, 0) for word in query_tf}
     
-    # Calculate similarities with pure Python
+    # Calculate similarities
     similarities = []
-    for doc_emb in doc_embeddings:
-        sim = cosine_similarity(query_embedding, doc_emb)
+    for chunk_vec in chunk_vectors:
+        sim = cosine_similarity_tfidf(query_tfidf, chunk_vec)
         similarities.append(sim)
     
     # Get top k indices
@@ -296,12 +316,10 @@ HTML_TEMPLATE = '''
             const question = userInput.value.trim();
             if (!question) return;
 
-            // Add user message
             addMessage(question, 'user');
             userInput.value = '';
             sendBtn.disabled = true;
 
-            // Add loading indicator
             const loadingDiv = document.createElement('div');
             loadingDiv.className = 'loading active';
             loadingDiv.innerHTML = '<span class="dot"></span><span class="dot"></span><span class="dot"></span>';
@@ -366,7 +384,7 @@ def chat():
         return jsonify({'error': 'No question provided'}), 400
     
     def generate():
-        # Get relevant context
+        # Get relevant context using TF-IDF
         context = find_relevant_context(question)
         
         # Create prompt
@@ -381,10 +399,10 @@ Answer:"""
         
         # Stream response from Groq
         completion = client.chat.completions.create(
-            model="moonshotai/kimi-k2-instruct-0905",
+            model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.6,
-            max_completion_tokens=4096,
+            max_completion_tokens=2048,
             top_p=1,
             stream=True,
             stop=None
@@ -400,10 +418,10 @@ Answer:"""
 def info():
     return jsonify({
         'app': 'Neuroscience RAG Chatbot',
-        'embeddings': 'Nomic AI (nomic-embed-text-v1.5)',
-        'llm': 'Groq (Moonshot Kimi)',
+        'retrieval': 'TF-IDF (keyword-based)',
+        'llm': 'Groq (Llama 3.3 70B)',
         'chunks': len(chunks),
-        'framework': 'Flask + RAG (pure Python, ultra-lightweight)'
+        'framework': 'Flask + RAG (ultra-lightweight)'
     })
 
 if __name__ == '__main__':

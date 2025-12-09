@@ -3,7 +3,6 @@ import nomic
 from nomic import embed
 import numpy as np
 from groq import Groq
-from sklearn.metrics.pairwise import cosine_similarity
 import os
 
 app = Flask(__name__)
@@ -20,6 +19,13 @@ nomic.cli.login(NOMIC_API_KEY)
 
 # Initialize Groq client
 client = Groq(api_key=GROQ_API_KEY)
+
+# Lightweight cosine similarity (no scikit-learn needed)
+def cosine_similarity(a, b):
+    """Calculate cosine similarity between vectors"""
+    a = np.array(a)
+    b = np.array(b)
+    return np.dot(a, b.T) / (np.linalg.norm(a, axis=1)[:, np.newaxis] * np.linalg.norm(b, axis=1))
 
 # Neuroscience knowledge base
 neuroscience_text = """Neuronal growth cones in the spinal cord of a chick embryo. These hand-like structures, on the tips of developing axons, carry out the most amazing feat of neural development: its wiring. Courtesy of the Cajal Institute, "Cajal Legacy," Spanish National Research Council (CSIC), Madrid, Spain.
@@ -79,6 +85,7 @@ def find_relevant_context(question, top_k=3):
     )
     query_embedding = np.array(query_output['embeddings'])
     
+    # Use custom cosine similarity
     similarities = cosine_similarity(query_embedding, doc_embeddings)[0]
     top_indices = np.argsort(similarities)[-top_k:][::-1]
     relevant_chunks = [chunks[i] for i in top_indices]
@@ -377,7 +384,7 @@ def info():
         'embeddings': 'Nomic AI (nomic-embed-text-v1.5)',
         'llm': 'Groq (Moonshot Kimi)',
         'chunks': len(chunks),
-        'framework': 'Flask + RAG'
+        'framework': 'Flask + RAG (lightweight)'
     })
 
 if __name__ == '__main__':

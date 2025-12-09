@@ -1,9 +1,9 @@
 from flask import Flask, render_template_string, request, jsonify, Response
 import nomic
 from nomic import embed
-import numpy as np
 from groq import Groq
 import os
+import math
 
 app = Flask(__name__)
 
@@ -20,12 +20,23 @@ nomic.cli.login(NOMIC_API_KEY)
 # Initialize Groq client
 client = Groq(api_key=GROQ_API_KEY)
 
-# Lightweight cosine similarity (no scikit-learn needed)
-def cosine_similarity(a, b):
-    """Calculate cosine similarity between vectors"""
-    a = np.array(a)
-    b = np.array(b)
-    return np.dot(a, b.T) / (np.linalg.norm(a, axis=1)[:, np.newaxis] * np.linalg.norm(b, axis=1))
+# Pure Python cosine similarity (no numpy!)
+def dot_product(v1, v2):
+    """Calculate dot product of two vectors"""
+    return sum(a * b for a, b in zip(v1, v2))
+
+def magnitude(v):
+    """Calculate magnitude of a vector"""
+    return math.sqrt(sum(x * x for x in v))
+
+def cosine_similarity(v1, v2):
+    """Calculate cosine similarity between two vectors"""
+    dot = dot_product(v1, v2)
+    mag1 = magnitude(v1)
+    mag2 = magnitude(v2)
+    if mag1 == 0 or mag2 == 0:
+        return 0.0
+    return dot / (mag1 * mag2)
 
 # Neuroscience knowledge base
 neuroscience_text = """Neuronal growth cones in the spinal cord of a chick embryo. These hand-like structures, on the tips of developing axons, carry out the most amazing feat of neural development: its wiring. Courtesy of the Cajal Institute, "Cajal Legacy," Spanish National Research Council (CSIC), Madrid, Spain.
@@ -73,7 +84,8 @@ output = embed.text(
     model='nomic-embed-text-v1.5',
     task_type='search_document',
 )
-doc_embeddings = np.array(output['embeddings'])
+# Store as Python lists instead of numpy arrays
+doc_embeddings = output['embeddings']
 print(f"Embedded {len(chunks)} text chunks")
 
 def find_relevant_context(question, top_k=3):
@@ -83,13 +95,20 @@ def find_relevant_context(question, top_k=3):
         model='nomic-embed-text-v1.5',
         task_type='search_query',
     )
-    query_embedding = np.array(query_output['embeddings'])
+    query_embedding = query_output['embeddings'][0]
     
-    # Use custom cosine similarity
-    similarities = cosine_similarity(query_embedding, doc_embeddings)[0]
-    top_indices = np.argsort(similarities)[-top_k:][::-1]
+    # Calculate similarities with pure Python
+    similarities = []
+    for doc_emb in doc_embeddings:
+        sim = cosine_similarity(query_embedding, doc_emb)
+        similarities.append(sim)
+    
+    # Get top k indices
+    indexed_sims = list(enumerate(similarities))
+    indexed_sims.sort(key=lambda x: x[1], reverse=True)
+    top_indices = [idx for idx, _ in indexed_sims[:top_k]]
+    
     relevant_chunks = [chunks[i] for i in top_indices]
-    
     return "\n\n".join(relevant_chunks)
 
 # HTML Template
@@ -384,7 +403,7 @@ def info():
         'embeddings': 'Nomic AI (nomic-embed-text-v1.5)',
         'llm': 'Groq (Moonshot Kimi)',
         'chunks': len(chunks),
-        'framework': 'Flask + RAG (lightweight)'
+        'framework': 'Flask + RAG (pure Python, ultra-lightweight)'
     })
 
 if __name__ == '__main__':
